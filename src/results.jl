@@ -1,4 +1,7 @@
+import Statistics
+import CSV
 using DataFrames
+
 """
 Returns a `DataFrame` with the values of the variables from the JuMP container `var`.
 The column names of the `DataFrame` can be specified for the indexing columns in `dim_names`,
@@ -72,4 +75,51 @@ function get_attacked_busses_df(scenarios::DataFrame)::DataFrame
         transposed_scenarios[!, col] = replace(transposed_scenarios[!, col], true => 1)
     end
     return transposed_scenarios
+end
+
+struct ResultsSummary
+    termination_status::JuMP.TerminationStatusCode
+    objective_value::Float64
+    solve_time::Float64
+    mean_load::Float64
+end
+
+function get_results_summary(dm::DispatchModel)::ResultsSummary
+    scenario_dict = dm.data.scenarios
+
+    mean_load = Statistics.mean([
+        sum((collect(values(scenario_dict[scenario_key].loads))))
+        for scenario_key in keys(scenario_dict)
+    ])
+
+    return ResultsSummary(
+        JuMP.termination_status(dm.m),
+        JuMP.objective_value(dm.m),
+        JuMP.solve_time(dm.m),
+        mean_load
+    )
+end
+
+# --- meta results
+
+function groupby_col(df::DataFrame, col::Symbol)::DataFrame
+    gdf = groupby(df, [col])
+    df = combine(gdf, [:objective_value => sum, :solve_time => sum, :mean_load => Statistics.mean])
+    return sort(df, :objective_value_sum)
+end
+
+
+function save_df_to_csv(df::DataFrame, filename::String)
+    CSV.write(filename, df)
+end
+
+function store_results_in_dir(results::DataFrame, dir_path::String)
+    by_month = groupby_col(results, :month)
+    by_source_path = groupby_col(results, :source_path)
+
+    mkpath(dir_path)
+
+    save_df_to_csv(by_month, joinpath(dir_path, "by_month.csv"))
+    save_df_to_csv(by_source_path, joinpath(dir_path, "by_source_path.csv"))
+    save_df_to_csv(results, joinpath(dir_path, "all_results.csv"))
 end

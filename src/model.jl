@@ -23,10 +23,12 @@ function DispatchModel(
     scenarios::Dict{Symbol,Scenario},
     budget::Float64
 )::DispatchModel
-    m = JuMP.Model(Gurobi.Optimizer)
+    optimizer = () -> Gurobi.Optimizer(GRB_ENV)
+    m = JuMP.Model(optimizer)
     # m = JuMP.Model(HiGHS.Optimizer)
     set_optimizer_attribute(m, "OutputFlag", 0)
     # set_optimizer_attribute(m, "log_to_console", false)
+
 
     variables = Dict{Symbol,Any}()
     constraints = Dict{Symbol,Any}()

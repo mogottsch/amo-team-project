@@ -13,15 +13,18 @@ LOAD_SHEET_NAME = "hourly_BusLoadP (MW)"
 DEFAULT_REINFORCMENT_COST = 1.0
 DEFAULT_SUSCEPTANCE = 500
 
-function read_data(filepath::String)::Tuple{Network,DataFrame}
+function read_network(filepath::String)::Network
     busses = parse_busses(filepath)
     lines = parse_lines!(filepath, busses)
     generators = parse_generators!(filepath, busses)
-    loads = parse_loads(filepath)
 
     network = Network(generators, busses, lines)
 
-    return network, loads
+    return network
+end
+
+function read_loads(filepath::String)::DataFrame
+    return parse_loads(filepath)
 end
 
 
