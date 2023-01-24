@@ -46,6 +46,7 @@ include("./results.jl")
 
 GRB_ENV = Gurobi.Env()
 function run_simulation(c::Config)
+    println("Initializing environment")
     results_df = create_results_df()
     global_loads = read_loads(c.data_source_paths[1])
 
@@ -58,7 +59,7 @@ function run_simulation(c::Config)
         c.n_reduced_weather_scenarios
     )
 
-    loads_dict = Dict{Symbol,DataFrame}()
+    loads_dict = Dict{Int,DataFrame}()
     for month in 1:MONTHS_PER_YEAR
         local_loads = remove_non_data_rows(filter_month(global_loads, month))
         reduced_load_scenarios = reduce_continous_scenarios(

@@ -1,3 +1,4 @@
+println("Compilitation finished")
 using Pkg;
 Pkg.activate(normpath(joinpath(@__DIR__, "..")));
 Pkg.instantiate();
@@ -35,4 +36,4 @@ results = run_simulation(config)
 
 store_results_in_dir(results, results_dir)
 
-println("Resuls stored in $(results_dir)")
+println("Results stored in $(results_dir)")
