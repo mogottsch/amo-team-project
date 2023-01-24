@@ -1,8 +1,15 @@
-using Dates
+import Dates
+import JuMP
+
+@enum GeneratorType begin
+    solar
+    wind
+    fossil
+end
 
 struct Generator
     id::Symbol
-    type::Symbol
+    type::GeneratorType
     bus::Symbol
     max_capacity::Float64
     min_capacity::Float64
@@ -11,9 +18,9 @@ end
 
 struct Bus
     id::Symbol
-    generators::Vector{Symbol}
-    incoming::Vector{Symbol}
-    outgoing::Vector{Symbol}
+    generators::Set{Symbol}
+    incoming::Set{Symbol}
+    outgoing::Set{Symbol}
     reinforcement_cost::Float64
 end
 

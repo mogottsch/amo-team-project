@@ -1,57 +1,158 @@
-import JuMP
+using JuMP
 import HiGHS
+import Gurobi
 include("./types.jl")
 
+
+struct ModelData
+    network::Network
+    scenarios::Dict{Symbol,Scenario}
+    budget::Float64
+end
+
 struct DispatchModel
+    data::ModelData
     m::JuMP.Model
     variables::Dict{Symbol,Any}
     constraints::Dict{Symbol,Any}
+    objective::Dict{Symbol,Any}
 end
 
-function build_model(
+function DispatchModel(
     network::Network,
     scenarios::Dict{Symbol,Scenario},
-    budget::Float64,
+    budget::Float64
 )::DispatchModel
-    m = JuMP.Model(HiGHS.Optimizer)
+    m = JuMP.Model(Gurobi.Optimizer)
+    # m = JuMP.Model(HiGHS.Optimizer)
+    set_optimizer_attribute(m, "OutputFlag", 0)
+    # set_optimizer_attribute(m, "log_to_console", false)
 
-    busses = network.busses
-    generators = network.generators
-    lines = network.lines
+    variables = Dict{Symbol,Any}()
+    constraints = Dict{Symbol,Any}()
+    objective = Dict{Symbol,Any}()
 
-    ##################### Variables #####################
-    @variable(m, r[b in keys(busses)], Bin) # reinforce bus
+    data = ModelData(network, scenarios, budget)
+
+    return DispatchModel(data, m, variables, constraints, objective)
+end
+
+function init_variables!(dm::DispatchModel)
+    generators = dm.data.network.generators
+    busses = dm.data.network.busses
+    lines = dm.data.network.lines
+    scenarios = dm.data.scenarios
+    m = dm.m
+
+    fossil_generators, renewable_generators = get_generators_by_type(generators)
+
+    # first-stage
+    dm.variables[:r] = @variable(m, r[b in keys(busses)], Bin) # reinforce bus
 
     ## second-stage
-    @variable(m, 0 <= P[g in keys(generators), s in keys(scenarios)]) # power generation
-    @variable(m, 0 <= L_shed[b in keys(busses), s in keys(scenarios)] <= busses[b].load) # load shedding
+    # note: the constraints in the following variables are redundant
+    # they may improve or worsen the performance of the solver - to be tested
+    dm.variables[:P_f] = @variable(m,
+        0 <=
+        P_f[g in keys(fossil_generators), s in keys(scenarios)]
+        <= fossil_generators[g].max_capacity
+    ) # fossil power generation
 
-    @variable(m, z[b in keys(busses), s in keys(scenarios)], Bin) # bus outage
-
-    @variable(m, F[l in keys(lines), s in keys(scenarios)]) # power flow
-    @variable(m, δ[b in keys(busses), s in keys(scenarios)]) # voltage angle
-
-    variables = Dict(
-        :r => r,
-        :P => P,
-        :L_shed => L_shed,
-        :z => z,
-        :F => F,
-        :δ => δ
-    )
+    dm.variables[:P_r] = @variable(m,
+        0 <=
+        P_w[g in keys(renewable_generators), s in keys(scenarios)]
+        <= renewable_generators[g].max_capacity
+    ) # renewable power generation
 
 
+    dm.variables[:P] = merge_dense_axis_arrays(
+        dm.variables[:P_f],
+        dm.variables[:P_r]
+    ) # total power generation
 
-    ##################### Objective #####################
+    dm.variables[:L_shed] = @variable(m,
+        0 <=
+        L_shed[b in keys(busses), s in keys(scenarios)]
+        <= scenarios[s].loads[b]
+    ) # load shedding
+
+    dm.variables[:z] = @variable(m,
+        z[b in keys(busses), s in keys(scenarios)],
+        Bin
+    ) # bus outage
+
+    dm.variables[:F] = @variable(m,
+        F[l in keys(lines), s in keys(scenarios)]
+    ) # power flow
+
+    dm.variables[:δ] = @variable(m,
+        δ[b in keys(busses), s in keys(scenarios)]
+    ) # voltage angle
+
+end
+
+function get_generators_by_type(
+    generators::Dict{Symbol,Generator}
+)::Tuple{Dict{Symbol,Generator},Dict{Symbol,Generator}}
+    fossil_generators = Dict{Symbol,Generator}()
+    renewable_generators = Dict{Symbol,Generator}()
+
+    for (id, generator) in generators
+        if generator.type == fossil
+            fossil_generators[id] = generator
+            continue
+        elseif generator.type == wind || generator.type == solar
+            renewable_generators[id] = generator
+            continue
+        else
+            error("Unknown generator type: $(generator.type)")
+        end
+    end
+
+    return fossil_generators, renewable_generators
+end
+
+function init_objective!(dm::DispatchModel)
+    m = dm.m
+    busses = dm.data.network.busses
+    scenarios = dm.data.scenarios
+    L_shed = dm.variables[:L_shed]
+
     # minimize expected load shedding over all scenarios
-    @objective(m, Min, sum(sum(L_shed[b, s] for b in keys(busses)) * 1 / length(scenarios) for s in keys(scenarios)))
+    dm.objective[:obj] = @objective(m,
+        Min,
+        sum(
+            sum(L_shed[b, s] for b in keys(busses))
+            *
+            scenarios[s].probability for s in keys(scenarios)
+        )
+    )
+end
+
+function init_constraints!(dm::DispatchModel)
+    m = dm.m
+    busses = dm.data.network.busses
+    lines = dm.data.network.lines
+    generators = dm.data.network.generators
+    scenarios = dm.data.scenarios
+    budget = dm.data.budget
 
 
-    ##################### Constraints #####################
+    fossil_generators, renewable_generators = get_generators_by_type(generators)
+
+    r = dm.variables[:r]
+    F = dm.variables[:F]
+    L_shed = dm.variables[:L_shed]
+    z = dm.variables[:z]
+    δ = dm.variables[:δ]
+    P = dm.variables[:P]
+    P_f = dm.variables[:P_f]
+    P_r = dm.variables[:P_r]
+
 
     ## first-stage
     ### reinforcement budget
-    @constraint(m,
+    dm.constraints[:reinforcement_budget] = @constraint(m,
         reinforcement_budget,
         sum(r[b] * busses[b].reinforcement_cost for b in keys(busses))
         <=
@@ -60,8 +161,9 @@ function build_model(
 
     ## second-stage
     ### power balance
-    @constraint(m,
+    dm.constraints[:power_balance] = @constraint(m,
         power_balance[b in keys(busses), s in keys(scenarios)],
+        #
         sum(P[g, s] for g in busses[b].generators)
         +
         sum(F[l, s] for l in busses[b].incoming)
@@ -70,64 +172,91 @@ function build_model(
         +
         L_shed[b, s]
         -
-        busses[b].load
-        ==
-        0
+        scenarios[s].loads[b] == 0
     )
+
     ### line flow
-    @constraint(m,
+    dm.constraints[:line_flow] = @constraint(m,
         line_flow[l in keys(lines), s in keys(scenarios)],
-        F[l, s] == lines[l].susceptance * (δ[lines[l].from, s] - δ[lines[l].to, s])
+        #
+        F[l, s] ==
+        lines[l].susceptance * (δ[lines[l].from, s] - δ[lines[l].to, s])
     )
+
     ### line flow under outage upper
-    @constraint(m,
-        line_flow_under_outage_upper[b in keys(busses), l in [busses[b].incoming; busses[b].outgoing], s in keys(scenarios)],
+    dm.constraints[:line_flow_under_outage_upper] = @constraint(m,
+        line_flow_under_outage_upper[b in keys(busses), l in union(busses[b].incoming, busses[b].outgoing), s in keys(scenarios)],
+        #
         F[l, s] <= lines[l].capacity * z[b, s]
     )
+
     ### line flow under outage lower
-    @constraint(m,
-        line_flow_under_outage_lower[b in keys(busses), l in [busses[b].incoming; busses[b].outgoing], s in keys(scenarios)],
+    dm.constraints[:line_flow_under_outage_lower] = @constraint(m,
+        line_flow_under_outage_lower[b in keys(busses), l in union(busses[b].incoming, busses[b].outgoing), s in keys(scenarios)],
+        #
         -lines[l].capacity * z[b, s] <= F[l, s]
     )
 
-    ### generator under outage lower
-    @constraint(m,
-        generator_under_outage_lower[g in keys(generators), s in keys(scenarios)],
-        -generators[g].capacity * z[generators[g].bus, s] <= P[g, s]
+    ### fossil generator under outage lower
+    dm.constraints[:fossil_generator_under_outage_lower] = @constraint(m,
+        fossil_generator_under_outage_lower[g in keys(fossil_generators), s in keys(scenarios)],
+        #
+        fossil_generators[g].min_capacity * z[fossil_generators[g].bus, s] <= P_f[g, s]
     )
-    ### generator under outage upper
-    @constraint(m,
-        generator_under_outage_upper[g in keys(generators), s in keys(scenarios)],
-        P[g, s] <= generators[g].capacity * z[generators[g].bus, s]
+
+    ### fossil generator under outage upper
+    dm.constraints[:fossil_generator_under_outage_upper] = @constraint(m,
+        fossil_generator_under_outage_upper[g in keys(fossil_generators), s in keys(scenarios)],
+        #
+        P_f[g, s] <= fossil_generators[g].max_capacity * z[fossil_generators[g].bus, s]
+    )
+
+    ### renewable generator under outage lower
+    dm.constraints[:renewable_generator_under_outage_lower] = @constraint(m,
+        renewable_generator_under_outage_lower[g in keys(renewable_generators), s in keys(scenarios)],
+        #
+        0 <= P_r[g, s]
+    )
+
+    ### fossil generator under outage upper
+    dm.constraints[:renewable_generator_under_outage_upper] = @constraint(m,
+        renewable_generator_under_outage_upper[g in keys(renewable_generators), s in keys(scenarios)],
+        #
+        P_r[g, s] <= scenarios[s].capacities[g] * z[renewable_generators[g].bus, s]
     )
 
     ### reference angle
-    @constraint(m,
+    dm.constraints[:reference_angle] = @constraint(m,
         reference_angle[s in keys(scenarios)],
         δ[:B1, s] == 0
     )
     ### attacked busses
-    @constraint(m,
+    dm.constraints[:attacked_busses] = @constraint(m,
         busses[s in keys(scenarios), b in keys(busses)],
         z[b, s] <= 1 - (b in scenarios[s].attacked_busses ? 1 : 0) + r[b]
     )
+end
 
-    constraints = Dict(
-        :reinforcement_budget => reinforcement_budget,
-        :power_balance => power_balance,
-        :line_flow => line_flow,
-        :line_flow_under_outage_upper => line_flow_under_outage_upper,
-        :line_flow_under_outage_lower => line_flow_under_outage_lower,
-        :generator_under_outage_lower => generator_under_outage_lower,
-        :generator_under_outage_upper => generator_under_outage_upper,
-        :reference_angle => reference_angle,
-        :busses => busses
-    )
-
-    return DispatchModel(m, variables, constraints)
+function init_model!(
+    dm::DispatchModel;
+)
+    init_variables!(dm)
+    init_objective!(dm)
+    init_constraints!(dm)
 end
 
 function solve!(model::DispatchModel)
     JuMP.optimize!(model.m)
     return JuMP.termination_status(model.m)
+end
+
+
+# merges two DenseAxisArrays with equal second axis
+function merge_dense_axis_arrays(
+    daa1::JuMP.Containers.DenseAxisArray,
+    daa2::JuMP.Containers.DenseAxisArray,
+)
+    axes = [vcat(daa1.axes[1], daa2.axes[1]), daa1.axes[2]]
+    daa = JuMP.Containers.DenseAxisArray(vcat(daa1.data, daa2.data), axes...)
+    return daa
 end

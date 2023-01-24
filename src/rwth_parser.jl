@@ -1,6 +1,8 @@
 include("types.jl")
 import XLSX
 import Dates
+using DataFrames
+import Dates
 
 
 BUS_SHEET_NAME = "Bus"
@@ -43,9 +45,9 @@ function parse_bus(row::DataFrameRow)::Bus
     bus_id = Symbol(:B, row[BUS_ID_COL])
     bus = Bus(
         bus_id,
-        [],
-        [],
-        [],
+        Set(),
+        Set(),
+        Set(),
         DEFAULT_REINFORCMENT_COST,
     )
     return bus
@@ -108,13 +110,25 @@ function parse_generator(row::DataFrameRow)::Generator
     bus_id = Symbol(:B, row[GENERATOR_BUS_ID_COL])
     generator = Generator(
         generator_id,
-        Symbol(row[GENERATOR_TYPE_COL]),
+        get_generator_type(row[GENERATOR_TYPE_COL]),
         bus_id,
         row[GENERATOR_MAX_CAPACITY_COL],
         row[GENERATOR_MIN_CAPACITY_COL],
         row[GENERATOR_COSTS_COL],
     )
     return generator
+end
+
+function get_generator_type(type::String)::GeneratorType
+    if type == "Solar"
+        return solar
+    elseif type == "Wind"
+        return wind
+    elseif type == "CCGT" || type == "Hard Coal" || type == "Gas" || type == "Lignite" || type == "Nuclear"
+        return fossil
+    else
+        error("Unknown generator type: $type")
+    end
 end
 
 LOAD_HOUR_COL = Symbol("Hour/Bus No.")
@@ -138,7 +152,7 @@ function parse_loads(filepath::String)::DataFrame
     return df
 end
 
-function parse_date(hour::Float64)::DateTime
-    datetime = DateTime(2023, 1, 1, 1)
-    return datetime + Hour(hour)
+function parse_date(hour::Float64)::Dates.DateTime
+    datetime = Dates.DateTime(2023, 1, 1, 1)
+    return datetime + Dates.Hour(hour)
 end
