@@ -123,3 +123,8 @@ function store_results_in_dir(results::DataFrame, dir_path::String)
     save_df_to_csv(by_source_path, joinpath(dir_path, "by_source_path.csv"))
     save_df_to_csv(results, joinpath(dir_path, "all_results.csv"))
 end
+
+
+function read_results_from_dir(dir_path::String)::DataFrame
+    return CSV.read(joinpath(dir_path, "all_results.csv"), DataFrame)
+end

@@ -1,6 +1,7 @@
 using JuMP
 import HiGHS
 import Gurobi
+import Printf
 include("./types.jl")
 
 
@@ -8,6 +9,8 @@ struct ModelData
     network::Network
     scenarios::Dict{Symbol,Scenario}
     budget::Float64
+    fossil_generators::Dict{Symbol,Generator}
+    renewable_generators::Dict{Symbol,Generator}
 end
 
 struct DispatchModel
@@ -19,24 +22,30 @@ struct DispatchModel
     objective::Dict{Symbol,Any}
 end
 
+function init_solver()::JuMP.Model
+    optimizer = () -> Gurobi.Optimizer(GRB_ENV)
+    m = JuMP.Model(optimizer)
+    # m = JuMP.Model(HiGHS.Optimizer)
+    set_optimizer_attribute(m, "OutputFlag", 0)
+    # set_optimizer_attribute(m, "log_to_console", false)
+    return m
+end
+
 function DispatchModel(
     network::Network,
     scenarios::Dict{Symbol,Scenario},
     budget::Float64
 )::DispatchModel
-    optimizer = () -> Gurobi.Optimizer(GRB_ENV)
-    m = JuMP.Model(optimizer)
+    m = init_solver()
     subproblems = Dict{Symbol,JuMP.Model}()
-    # m = JuMP.Model(HiGHS.Optimizer)
-    set_optimizer_attribute(m, "OutputFlag", 0)
-    # set_optimizer_attribute(m, "log_to_console", false)
-
 
     variables = Dict{Symbol,Any}()
     constraints = Dict{Symbol,Any}()
     objective = Dict{Symbol,Any}()
 
-    data = ModelData(network, scenarios, budget)
+    fossil_generators, renewable_generators = get_generators_by_type(network.generators)
+
+    data = ModelData(network, scenarios, budget, fossil_generators, renewable_generators)
 
     return DispatchModel(data, m, subproblems, variables, constraints, objective)
 end
@@ -46,7 +55,7 @@ function init_model!(
 )
     m = dm.m
     init_variables!(dm, Symbol())
-    init_objective!(dm, m, Symbol())
+    append_objective!(dm, m, Symbol())
     init_constraints!(dm, Symbol())
 end
 
@@ -54,18 +63,84 @@ function init_variables!(dm::DispatchModel, vkey::Symbol)
     m = dm.m
 
     dm.variables[vkey] = Dict{Symbol,Any}()
-    append_first_stage_variables!(dm, m, vkey)
+
+    for s in keys(dm.data.scenarios)
+        dm.variables[vkey][s] = Dict{Symbol,Any}()
+    end
+
+    append_binary_variables!(dm, m, vkey)
     append_second_stage_variables!(dm, m, vkey)
 end
 
-function append_first_stage_variables!(
+function append_binary_variables!(
     dm::DispatchModel,
     m::JuMP.Model,
     vkey::Symbol,
 )
     busses = dm.data.network.busses
+    scenarios = dm.data.scenarios
 
-    dm.variables[vkey][:r] = @variable(m, r[b in keys(busses)], Bin) # reinforce bus
+    dm.variables[vkey][:r] = @variable(m, [b in keys(busses)], Bin, base_name = "r") # bus reinforced
+
+    for s in keys(scenarios)
+        append_bus_active_variables!(dm, m, vkey, s, false)
+    end
+end
+
+function append_bus_active_variables!(
+    dm::DispatchModel,
+    m::JuMP.Model,
+    vkey::Symbol,
+    s::Symbol,
+    decomposed::Bool
+)
+    busses = dm.data.network.busses
+    # in the decomposed case we don't need z to be binary, as we will fix it
+    if decomposed
+        dm.variables[vkey][s][:z] = @variable(m, [b in keys(busses)]) # bus active
+    else
+        dm.variables[vkey][s][:z] = @variable(m, [b in keys(busses)], Bin) # bus active
+    end
+end
+
+function append_second_stage_variables_for_scenario!(
+    dm::DispatchModel,
+    m::JuMP.Model,
+    vkey::Symbol,
+    s::Symbol,
+)
+    busses = dm.data.network.busses
+    lines = dm.data.network.lines
+    fossil_generators = dm.data.fossil_generators
+    renewable_generators = dm.data.renewable_generators
+
+    # second-stage
+    dm.variables[vkey][s][:P_f] = @variable(m,
+        [g in keys(fossil_generators)]
+    ) # fossil power generation
+
+    dm.variables[vkey][s][:P_r] = @variable(m,
+        [g in keys(renewable_generators)]
+    ) # renewable power generation
+
+
+    dm.variables[vkey][s][:P] = merge_dense_axis_arrays(
+        dm.variables[vkey][s][:P_f],
+        dm.variables[vkey][s][:P_r]
+    ) # total power generation
+
+    dm.variables[vkey][s][:L_shed] = @variable(m,
+        [b in keys(busses)]
+    ) # load shedding
+
+    dm.variables[vkey][s][:F] = @variable(m,
+        [l in keys(lines)]
+    ) # power flow
+
+    dm.variables[vkey][s][:δ] = @variable(m,
+        [b in keys(busses)]
+    ) # voltage angle
+
 end
 
 function append_second_stage_variables!(
@@ -73,52 +148,10 @@ function append_second_stage_variables!(
     m::JuMP.Model,
     vkey::Symbol,
 )
-    generators = dm.data.network.generators
-    busses = dm.data.network.busses
-    lines = dm.data.network.lines
     scenarios = dm.data.scenarios
-
-    fossil_generators, renewable_generators = get_generators_by_type(generators)
-
-    ## second-stage
-    # note: the constraints in the following variables are redundant
-    # they may improve or worsen the performance of the solver - to be tested
-    dm.variables[vkey][:P_f] = @variable(m,
-        0 <=
-        P_f[g in keys(fossil_generators), s in keys(scenarios)]
-        <= fossil_generators[g].max_capacity
-    ) # fossil power generation
-
-    dm.variables[vkey][:P_r] = @variable(m,
-        0 <=
-        P_w[g in keys(renewable_generators), s in keys(scenarios)]
-        <= renewable_generators[g].max_capacity
-    ) # renewable power generation
-
-
-    dm.variables[vkey][:P] = merge_dense_axis_arrays(
-        dm.variables[vkey][:P_f],
-        dm.variables[vkey][:P_r]
-    ) # total power generation
-
-    dm.variables[vkey][:L_shed] = @variable(m,
-        0 <=
-        L_shed[b in keys(busses), s in keys(scenarios)]
-        <= scenarios[s].loads[b]
-    ) # load shedding
-
-    dm.variables[vkey][:z] = @variable(m,
-        z[b in keys(busses), s in keys(scenarios)],
-        Bin
-    ) # bus outage
-
-    dm.variables[vkey][:F] = @variable(m,
-        F[l in keys(lines), s in keys(scenarios)]
-    ) # power flow
-
-    dm.variables[vkey][:δ] = @variable(m,
-        δ[b in keys(busses), s in keys(scenarios)]
-    ) # voltage angle
+    for s in keys(scenarios)
+        append_second_stage_variables_for_scenario!(dm, m, vkey, s)
+    end
 end
 
 function get_generators_by_type(
@@ -142,19 +175,29 @@ function get_generators_by_type(
     return fossil_generators, renewable_generators
 end
 
-function init_objective!(dm::DispatchModel, m::JuMP.Model, vkey::Symbol)
+function append_objective!(dm::DispatchModel, m::JuMP.Model, vkey::Symbol)
     busses = dm.data.network.busses
     scenarios = dm.data.scenarios
-    L_shed = dm.variables[vkey][:L_shed]
 
     # minimize expected load shedding over all scenarios
     dm.objective[vkey] = @objective(m,
         Min,
         sum(
-            sum(L_shed[b, s] for b in keys(busses))
+            sum(dm.variables[vkey][s][:L_shed][b] for b in keys(busses))
             *
             scenarios[s].probability for s in keys(scenarios)
         )
+    )
+end
+
+function append_sp_objective!(dm::DispatchModel, m::JuMP.Model, vkey::Symbol, s::Symbol)
+    busses = dm.data.network.busses
+    L_shed = dm.variables[vkey][s][:L_shed]
+    scenario = dm.data.scenarios[s]
+
+    dm.objective[vkey][s] = @objective(m,
+        Min,
+        sum(L_shed[b] for b in keys(busses)) * scenario.probability
     )
 end
 
@@ -163,11 +206,11 @@ function init_constraints!(dm::DispatchModel, vkey::Symbol)
 
     dm.constraints[vkey] = Dict{Symbol,Any}()
 
-    init_first_stage_constraints(dm, m, vkey)
-    init_second_stage_constraints(dm, m, vkey)
+    append_first_stage_constraints!(dm, m, vkey)
+    append_second_stage_constraints!(dm, m, vkey)
 end
 
-function init_first_stage_constraints(
+function append_first_stage_constraints!(
     dm::DispatchModel,
     m::JuMP.Model,
     vkey::Symbol
@@ -186,120 +229,399 @@ function init_first_stage_constraints(
     )
 end
 
-function init_second_stage_constraints(
+function append_second_stage_constraints_for_scenario!(
+    dm::DispatchModel,
+    m::JuMP.Model,
+    vkey::Symbol,
+    s::Symbol,
+    decomposed::Bool
+)
+    busses = dm.data.network.busses
+    lines = dm.data.network.lines
+    scenario = dm.data.scenarios[s]
+
+    fossil_generators = dm.data.fossil_generators
+    renewable_generators = dm.data.renewable_generators
+
+    r = nothing
+    if !decomposed
+        r = dm.variables[vkey][:r]
+    end
+
+    F = dm.variables[vkey][s][:F]
+    L_shed = dm.variables[vkey][s][:L_shed]
+    z = dm.variables[vkey][s][:z]
+    δ = dm.variables[vkey][s][:δ]
+    P = dm.variables[vkey][s][:P]
+    P_f = dm.variables[vkey][s][:P_f]
+    P_r = dm.variables[vkey][s][:P_r]
+
+
+    dm.constraints[vkey][s] = Dict{Symbol,Any}()
+
+    ## second-stage
+
+    dm.constraints[vkey][s][:P_f_lower] = @constraint(m,
+        [g in keys(fossil_generators)],
+        #
+        P_f[g] >= 0
+    )
+    dm.constraints[vkey][s][:P_r_lower] = @constraint(m,
+        [g in keys(renewable_generators)],
+        #
+        P_r[g] >= 0
+    )
+
+
+    dm.constraints[vkey][s][:L_shed_bounds] = @constraint(m,
+        [b in keys(busses)],
+        #
+        0 <= L_shed[b] <= scenario.loads[b]
+    ) # load shedding
+
+
+    ### power balance
+    dm.constraints[vkey][s][:power_balance] = @constraint(m,
+        [b in keys(busses)],
+        #
+        sum(P[g] for g in busses[b].generators)
+        +
+        sum(F[l] for l in busses[b].incoming)
+        -
+        sum(F[l] for l in busses[b].outgoing)
+        +
+        L_shed[b]
+        -
+        scenario.loads[b] == 0
+    )
+
+    ### line flow
+    dm.constraints[vkey][s][:line_flow] = @constraint(m,
+        [l in keys(lines)],
+        #
+        F[l] ==
+        lines[l].susceptance * (δ[lines[l].from] - δ[lines[l].to])
+    )
+
+    ### line flow under outage upper
+    dm.constraints[vkey][s][:line_flow_under_outage_upper] = @constraint(m,
+        [b in keys(busses), l in union(busses[b].incoming, busses[b].outgoing)],
+        #
+        F[l] <= lines[l].capacity * z[b]
+    )
+
+    ### line flow under outage lower
+    dm.constraints[vkey][s][:line_flow_under_outage_lower] = @constraint(m,
+        [b in keys(busses), l in union(busses[b].incoming, busses[b].outgoing)],
+        #
+        -lines[l].capacity * z[b] <= F[l]
+    )
+
+    ### fossil generator under outage lower
+    dm.constraints[vkey][s][:fossil_generator_under_outage_lower] = @constraint(m,
+        [g in keys(fossil_generators)],
+        #
+        # fossil_generators[g].min_capacity * z[fossil_generators[g].bus] <= P_f[g]
+        0 <= P_f[g]
+    )
+
+    ### fossil generator under outage upper
+    dm.constraints[vkey][s][:fossil_generator_under_outage_upper] = @constraint(m,
+        [g in keys(fossil_generators)],
+        #
+        P_f[g] <= fossil_generators[g].max_capacity * z[fossil_generators[g].bus]
+    )
+
+    ### renewable generator under outage lower
+    dm.constraints[vkey][s][:renewable_generator_under_outage_lower] = @constraint(m,
+        [g in keys(renewable_generators)],
+        #
+        0 <= P_r[g]
+    )
+
+    ### fossil generator under outage upper
+    dm.constraints[vkey][s][:renewable_generator_under_outage_upper] = @constraint(m,
+        [g in keys(renewable_generators)],
+        #
+        P_r[g] <= scenario.capacities[g] * z[renewable_generators[g].bus]
+    )
+
+    ### reference angle
+    dm.constraints[vkey][s][:reference_angle] = @constraint(m,
+        δ[:B1] == 0
+    )
+
+    # in the decomposed case z is fixed
+    if !decomposed
+        ### attacked busses
+        dm.constraints[vkey][s][:attacked_busses] = @constraint(m,
+            [b in keys(busses)],
+            #
+            z[b] <= 1 - (b in scenario.attacked_busses ? 1 : 0) + r[b])
+    end
+end
+
+function append_second_stage_constraints!(
     dm::DispatchModel,
     m::JuMP.Model,
     vkey::Symbol
 )
-    busses = dm.data.network.busses
-    lines = dm.data.network.lines
-    generators = dm.data.network.generators
     scenarios = dm.data.scenarios
 
-    fossil_generators, renewable_generators = get_generators_by_type(generators)
-
-    r = dm.variables[vkey][:r]
-    F = dm.variables[vkey][:F]
-    L_shed = dm.variables[vkey][:L_shed]
-    z = dm.variables[vkey][:z]
-    δ = dm.variables[vkey][:δ]
-    P = dm.variables[vkey][:P]
-    P_f = dm.variables[vkey][:P_f]
-    P_r = dm.variables[vkey][:P_r]
-
-
-
-    ## second-stage
-    ### power balance
-    dm.constraints[vkey][:power_balance] = @constraint(m,
-        power_balance[b in keys(busses), s in keys(scenarios)],
-        #
-        sum(P[g, s] for g in busses[b].generators)
-        +
-        sum(F[l, s] for l in busses[b].incoming)
-        -
-        sum(F[l, s] for l in busses[b].outgoing)
-        +
-        L_shed[b, s]
-        -
-        scenarios[s].loads[b] == 0
-    )
-
-    ### line flow
-    dm.constraints[vkey][:line_flow] = @constraint(m,
-        line_flow[l in keys(lines), s in keys(scenarios)],
-        #
-        F[l, s] ==
-        lines[l].susceptance * (δ[lines[l].from, s] - δ[lines[l].to, s])
-    )
-
-    ### line flow under outage upper
-    dm.constraints[vkey][:line_flow_under_outage_upper] = @constraint(m,
-        line_flow_under_outage_upper[b in keys(busses), l in union(busses[b].incoming, busses[b].outgoing), s in keys(scenarios)],
-        #
-        F[l, s] <= lines[l].capacity * z[b, s]
-    )
-
-    ### line flow under outage lower
-    dm.constraints[vkey][:line_flow_under_outage_lower] = @constraint(m,
-        line_flow_under_outage_lower[b in keys(busses), l in union(busses[b].incoming, busses[b].outgoing), s in keys(scenarios)],
-        #
-        -lines[l].capacity * z[b, s] <= F[l, s]
-    )
-
-    ### fossil generator under outage lower
-    dm.constraints[vkey][:fossil_generator_under_outage_lower] = @constraint(m,
-        fossil_generator_under_outage_lower[g in keys(fossil_generators), s in keys(scenarios)],
-        #
-        fossil_generators[g].min_capacity * z[fossil_generators[g].bus, s] <= P_f[g, s]
-    )
-
-    ### fossil generator under outage upper
-    dm.constraints[vkey][:fossil_generator_under_outage_upper] = @constraint(m,
-        fossil_generator_under_outage_upper[g in keys(fossil_generators), s in keys(scenarios)],
-        #
-        P_f[g, s] <= fossil_generators[g].max_capacity * z[fossil_generators[g].bus, s]
-    )
-
-    ### renewable generator under outage lower
-    dm.constraints[vkey][:renewable_generator_under_outage_lower] = @constraint(m,
-        renewable_generator_under_outage_lower[g in keys(renewable_generators), s in keys(scenarios)],
-        #
-        0 <= P_r[g, s]
-    )
-
-    ### fossil generator under outage upper
-    dm.constraints[vkey][:renewable_generator_under_outage_upper] = @constraint(m,
-        renewable_generator_under_outage_upper[g in keys(renewable_generators), s in keys(scenarios)],
-        #
-        P_r[g, s] <= scenarios[s].capacities[g] * z[renewable_generators[g].bus, s]
-    )
-
-    ### reference angle
-    dm.constraints[vkey][:reference_angle] = @constraint(m,
-        reference_angle[s in keys(scenarios)],
-        δ[:B1, s] == 0
-    )
-    ### attacked busses
-    dm.constraints[vkey][:attacked_busses] = @constraint(m,
-        busses[s in keys(scenarios), b in keys(busses)],
-        z[b, s] <= 1 - (b in scenarios[s].attacked_busses ? 1 : 0) + r[b]
-    )
+    for s in keys(scenarios)
+        append_second_stage_constraints_for_scenario!(dm, m, vkey, s, false)
+    end
 end
 
 
 function solve!(model::DispatchModel)
-    JuMP.optimize!(model.m)
-    return JuMP.termination_status(model.m)
+    solve_problem!(model.m)
+end
+
+ABSOLUTE_OPTIMALITY_GAP = 1e-6
+function solve_with_benders!(dm::DispatchModel)
+    init_masterproblem!(dm)
+    init_subproblems!(dm)
+
+
+    # z_k = init_complicating_variables(dm)
+
+    for i in 1:1000
+        solve_masterproblem!(dm)
+        lower_bound = JuMP.objective_value(dm.m)
+        z_k = get_values_of_cv(dm)
+
+        # cv = complicating variables
+        # sps = subproblems
+        fix_cvs_in_sps!(dm, z_k)
+
+        solve_subproblems!(dm)
+        objectives = get_objectives_of_sps(dm)
+
+        upper_bound = sum([objectives[s] for s in keys(objectives)])
+
+        gap = (upper_bound - lower_bound) / upper_bound
+        print_iteration(i, lower_bound, upper_bound, gap)
+
+        if gap < ABSOLUTE_OPTIMALITY_GAP
+            println("Optimal solution found.")
+            break
+        end
+
+        μs = get_duals_of_cv(dm)
+        append_benders_cut_to_masterproblem!(dm, z_k, objectives, μs, i)
+
+
+        # positive_r = [r for r in keys(R) if R[r] > 0]
+        # println("positive r: $positive_r, ")
+        # println(JuMP.objective_value(dm.m))
+    end
+end
+
+function print_iteration(k, args...)
+    f(x) = Printf.@sprintf("%12.4e", x)
+    println(lpad(k, 9), " ", join(f.(args), " "))
+    return
+end
+
+function init_masterproblem!(dm::DispatchModel)
+    m = dm.m
+
+    vkey = :mp
+
+    dm.variables[vkey] = Dict{Symbol,Any}()
+    for s in keys(dm.data.scenarios)
+        dm.variables[vkey][s] = Dict{Symbol,Any}()
+    end
+    dm.constraints[vkey] = Dict{Symbol,Any}()
+
+    append_binary_variables!(dm, m, vkey)
+    append_master_problem_variables!(dm, m, vkey) # appends α
+
+    append_masterproblem_objective!(dm, m, vkey)
+
+    append_first_stage_constraints!(dm, m, vkey)
+end
+
+function append_master_problem_variables!(
+    dm::DispatchModel,
+    m::JuMP.Model,
+    vkey::Symbol,
+)
+    scenarios = dm.data.scenarios
+    dm.variables[vkey][:α] = @variable(m,
+        α[s in keys(scenarios)] >= -1000
+    )
+end
+
+function append_masterproblem_objective!(
+    dm::DispatchModel,
+    m::JuMP.Model,
+    vkey::Symbol,
+)
+    @objective(m,
+        Min,
+        sum(
+            sum(
+                dm.variables[vkey][:α][s]
+                for s in keys(dm.data.scenarios)
+            )
+            for b in keys(dm.data.network.busses)
+        )
+    )
+end
+
+function init_subproblems!(dm::DispatchModel)
+    vkey = Symbol(:sp)
+    dm.variables[vkey] = Dict{Symbol,Any}()
+    dm.constraints[vkey] = Dict{Symbol,Any}()
+    dm.objective[vkey] = Dict{Symbol,Any}()
+
+    for s in keys(dm.data.scenarios)
+        init_subproblem!(dm, s)
+    end
+end
+
+function init_subproblem!(dm::DispatchModel, s::Symbol)
+    vkey = Symbol(:sp)
+
+    m = init_solver()
+
+    dm.subproblems[s] = m
+    dm.variables[vkey][s] = Dict{Symbol,Any}()
+    dm.constraints[vkey][s] = Dict{Symbol,Any}()
+
+    append_second_stage_variables_for_scenario!(dm, m, vkey, s)
+    append_bus_active_variables!(dm, m, vkey, s, true)
+    append_sp_objective!(dm, m, vkey, s)
+    append_second_stage_constraints_for_scenario!(dm, m, vkey, s, true)
 end
 
 
-# merges two DenseAxisArrays with equal second axis
+# merges two one-dimensional DenseAxisArrays
 function merge_dense_axis_arrays(
     daa1::JuMP.Containers.DenseAxisArray,
     daa2::JuMP.Containers.DenseAxisArray,
 )
-    axes = [vcat(daa1.axes[1], daa2.axes[1]), daa1.axes[2]]
-    daa = JuMP.Containers.DenseAxisArray(vcat(daa1.data, daa2.data), axes...)
+    axes = vcat(daa1.axes[1], daa2.axes[1])
+    daa = JuMP.Containers.DenseAxisArray(vcat(daa1.data, daa2.data), axes)
     return daa
+end
+
+function init_complicating_variables(
+    dm::DispatchModel,
+)::Dict{Symbol,Dict{Symbol,Int}}
+    busses = dm.data.network.busses
+    scenarios = dm.data.scenarios
+
+    z = Dict{Symbol,Dict{Symbol,Int}}()
+    for s in keys(scenarios)
+        scenario = scenarios[s]
+        z[s] = Dict{Symbol,Int}()
+        for b in keys(busses)
+            # initally set bus active if it is not attacked
+            z[s][b] = (b in scenario.attacked_busses ? 0 : 1)
+        end
+    end
+
+    return z
+end
+
+function fix_cvs_in_sps!(
+    dm::DispatchModel,
+    z_k::Dict{Symbol,Dict{Symbol,Int}},
+)
+    for s in keys(dm.data.scenarios)
+        fix_cvs_in_sp!(dm, s, z_k)
+    end
+end
+
+function remove_cv_fixed_constraint_from_sps!(dm::DispatchModel)
+    for s in keys(dm.data.scenarios)
+        remove_cv_fixed_constraint_from_sp!(dm, s)
+    end
+end
+
+function fix_cvs_in_sp!(
+    dm::DispatchModel,
+    s::Symbol,
+    z_k::Dict{Symbol,Dict{Symbol,Int}},
+)
+    vkey = :sp
+    busses = dm.data.network.busses
+
+    for b in keys(busses)
+        fix(dm.variables[vkey][s][:z][b], z_k[s][b])
+    end
+end
+
+function solve_subproblems!(dm::DispatchModel)
+    for s in keys(dm.data.scenarios)
+        solve_subproblem!(dm, s)
+    end
+end
+
+function solve_subproblem!(dm::DispatchModel, s::Symbol)
+    m = dm.subproblems[s]
+    solve_problem!(m)
+end
+
+function get_objectives_of_sps(dm::DispatchModel)
+    objectives = Dict{Symbol,Float64}()
+    for s in keys(dm.data.scenarios)
+        objectives[s] = JuMP.objective_value(dm.subproblems[s])
+    end
+    return objectives
+end
+
+function get_duals_of_cv(dm::DispatchModel)
+    μs = Dict{Symbol,Dict{Symbol,Float64}}()
+    for s in keys(dm.data.scenarios)
+        μs[s] = Dict{Symbol,Float64}()
+        for b in keys(dm.data.network.busses)
+            μs[s][b] = JuMP.reduced_cost(dm.variables[:sp][s][:z][b])
+        end
+    end
+    return μs
+end
+
+function append_benders_cut_to_masterproblem!(
+    dm::DispatchModel,
+    z_k::Dict{Symbol,Dict{Symbol,Int}},
+    objectives::Dict{Symbol,Float64},
+    μs::Dict{Symbol,Dict{Symbol,Float64}},
+    i::Int,
+)
+    m = dm.m
+    vkey = :mp
+    busses = dm.data.network.busses
+    α = dm.variables[vkey][:α]
+    r = dm.variables[vkey][:r]
+
+    dm.constraints[vkey][Symbol(:benders_cut, i)] = @constraint(m,
+        [s in keys(dm.data.scenarios)],
+        #
+        objectives[s] + sum(μs[s][b] * (r[b] - z_k[s][b]) for b in keys(busses)) <= α[s]
+    )
+end
+
+function solve_masterproblem!(dm::DispatchModel)
+    m = dm.m
+    solve_problem!(m)
+end
+
+function solve_problem!(m)
+    JuMP.optimize!(m)
+
+    if JuMP.termination_status(m) != MOI.OPTIMAL
+        error("Optimization failed with status $(JuMP.termination_status(m))")
+    end
+end
+
+function get_values_of_cv(dm::DispatchModel)::Dict{Symbol,Int}
+    R = Dict{Symbol,Int}()
+    for b in keys(dm.data.network.busses)
+        R[b] = round(JuMP.value(dm.variables[:mp][:r][b]))
+    end
+    return R
 end
