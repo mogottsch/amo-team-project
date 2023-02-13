@@ -25,8 +25,9 @@ end
 function init_solver()::JuMP.Model
     optimizer = () -> Gurobi.Optimizer(GRB_ENV)
     m = JuMP.Model(optimizer)
-    # m = JuMP.Model(HiGHS.Optimizer)
     set_optimizer_attribute(m, "OutputFlag", 0)
+
+    # m = JuMP.Model(HiGHS.Optimizer)
     # set_optimizer_attribute(m, "log_to_console", false)
     return m
 end
@@ -83,11 +84,11 @@ function append_binary_variables!(
     dm.variables[vkey][:r] = @variable(m, [b in keys(busses)], Bin, base_name = "r") # bus reinforced
 
     for s in keys(scenarios)
-        append_bus_active_variables!(dm, m, vkey, s, false)
+        append_complicating_variables!(dm, m, vkey, s, false)
     end
 end
 
-function append_bus_active_variables!(
+function append_complicating_variables!(
     dm::DispatchModel,
     m::JuMP.Model,
     vkey::Symbol,
@@ -97,9 +98,9 @@ function append_bus_active_variables!(
     busses = dm.data.network.busses
     # in the decomposed case we don't need z to be binary, as we will fix it
     if decomposed
-        dm.variables[vkey][s][:z] = @variable(m, [b in keys(busses)]) # bus active
+        dm.variables[vkey][s][:z] = @variable(m, [b in keys(busses)], base_name = "z") # bus active
     else
-        dm.variables[vkey][s][:z] = @variable(m, [b in keys(busses)], Bin) # bus active
+        dm.variables[vkey][s][:z] = @variable(m, [b in keys(busses)], Bin, base_name = "z") # bus active
     end
 end
 
@@ -116,11 +117,13 @@ function append_second_stage_variables_for_scenario!(
 
     # second-stage
     dm.variables[vkey][s][:P_f] = @variable(m,
-        [g in keys(fossil_generators)]
+        [g in keys(fossil_generators)],
+        base_name = "P_f"
     ) # fossil power generation
 
     dm.variables[vkey][s][:P_r] = @variable(m,
-        [g in keys(renewable_generators)]
+        [g in keys(renewable_generators)],
+        base_name = "P_r"
     ) # renewable power generation
 
 
@@ -130,15 +133,18 @@ function append_second_stage_variables_for_scenario!(
     ) # total power generation
 
     dm.variables[vkey][s][:L_shed] = @variable(m,
-        [b in keys(busses)]
+        [b in keys(busses)],
+        base_name = "L_shed"
     ) # load shedding
 
     dm.variables[vkey][s][:F] = @variable(m,
-        [l in keys(lines)]
+        [l in keys(lines)],
+        base_name = "F"
     ) # power flow
 
     dm.variables[vkey][s][:δ] = @variable(m,
-        [b in keys(busses)]
+        [b in keys(busses)],
+        base_name = "δ"
     ) # voltage angle
 
 end
@@ -386,10 +392,16 @@ function solve_with_benders!(dm::DispatchModel)
 
     # z_k = init_complicating_variables(dm)
 
+    z_ks = []
+
+    print_header()
     for i in 1:1000
         solve_masterproblem!(dm)
         lower_bound = JuMP.objective_value(dm.m)
+
+        # get values of complicating variables from master problem
         z_k = get_values_of_cv(dm)
+        z_ks = [z_ks; z_k]
 
         # cv = complicating variables
         # sps = subproblems
@@ -400,8 +412,9 @@ function solve_with_benders!(dm::DispatchModel)
 
         upper_bound = sum([objectives[s] for s in keys(objectives)])
 
-        gap = (upper_bound - lower_bound) / upper_bound
-        print_iteration(i, lower_bound, upper_bound, gap)
+        gap = (upper_bound - lower_bound)
+        normalized_gap = gap / abs(upper_bound)
+        print_iteration(i, lower_bound, upper_bound, gap, normalized_gap)
 
         if gap < ABSOLUTE_OPTIMALITY_GAP
             println("Optimal solution found.")
@@ -410,16 +423,18 @@ function solve_with_benders!(dm::DispatchModel)
 
         μs = get_duals_of_cv(dm)
         append_benders_cut_to_masterproblem!(dm, z_k, objectives, μs, i)
-
-
-        # positive_r = [r for r in keys(R) if R[r] > 0]
-        # println("positive r: $positive_r, ")
-        # println(JuMP.objective_value(dm.m))
     end
+    return z_ks, μs
+end
+
+function print_header()
+    header = ["lower bound", "upper bound", "gap"]
+    header_padded = [lpad(h, 15) for h in header]
+    println(lpad(0, 9), " ", join(header_padded, " "))
 end
 
 function print_iteration(k, args...)
-    f(x) = Printf.@sprintf("%12.4e", x)
+    f(x) = Printf.@sprintf("%15i", x)
     println(lpad(k, 9), " ", join(f.(args), " "))
     return
 end
@@ -441,6 +456,31 @@ function init_masterproblem!(dm::DispatchModel)
     append_masterproblem_objective!(dm, m, vkey)
 
     append_first_stage_constraints!(dm, m, vkey)
+    append_z_derived_by_r_constraints!(dm, m, vkey)
+end
+
+function append_z_derived_by_r_constraints!(
+    dm::DispatchModel,
+    m::JuMP.Model,
+    vkey::Symbol,
+)
+    busses = dm.data.network.busses
+
+    scenarios = dm.data.scenarios
+
+    for s in keys(scenarios)
+        scenario = scenarios[s]
+        z = dm.variables[vkey][s][:z]
+        r = dm.variables[vkey][:r]
+
+        dm.constraints[vkey][s] = Dict{Symbol,Any}()
+
+        ### attacked busses
+        dm.constraints[vkey][s][:attacked_busses] = @constraint(m,
+            [b in keys(busses)],
+            #
+            z[b] <= 1 - (b in scenario.attacked_busses ? 1 : 0) + r[b])
+    end
 end
 
 function append_master_problem_variables!(
@@ -450,7 +490,7 @@ function append_master_problem_variables!(
 )
     scenarios = dm.data.scenarios
     dm.variables[vkey][:α] = @variable(m,
-        α[s in keys(scenarios)] >= -1000
+        α[s in keys(scenarios)] >= -1000 # TODO: what is a good lower bound?
     )
 end
 
@@ -492,7 +532,7 @@ function init_subproblem!(dm::DispatchModel, s::Symbol)
     dm.constraints[vkey][s] = Dict{Symbol,Any}()
 
     append_second_stage_variables_for_scenario!(dm, m, vkey, s)
-    append_bus_active_variables!(dm, m, vkey, s, true)
+    append_complicating_variables!(dm, m, vkey, s, true)
     append_sp_objective!(dm, m, vkey, s)
     append_second_stage_constraints_for_scenario!(dm, m, vkey, s, true)
 end
@@ -529,7 +569,7 @@ end
 
 function fix_cvs_in_sps!(
     dm::DispatchModel,
-    z_k::Dict{Symbol,Dict{Symbol,Int}},
+    z_k::Dict{Symbol,Dict{Symbol,Int}}
 )
     for s in keys(dm.data.scenarios)
         fix_cvs_in_sp!(dm, s, z_k)
@@ -545,7 +585,7 @@ end
 function fix_cvs_in_sp!(
     dm::DispatchModel,
     s::Symbol,
-    z_k::Dict{Symbol,Dict{Symbol,Int}},
+    z_k::Dict{Symbol,Dict{Symbol,Int}}
 )
     vkey = :sp
     busses = dm.data.network.busses
@@ -595,13 +635,14 @@ function append_benders_cut_to_masterproblem!(
     m = dm.m
     vkey = :mp
     busses = dm.data.network.busses
+
     α = dm.variables[vkey][:α]
-    r = dm.variables[vkey][:r]
 
     dm.constraints[vkey][Symbol(:benders_cut, i)] = @constraint(m,
         [s in keys(dm.data.scenarios)],
         #
-        objectives[s] + sum(μs[s][b] * (r[b] - z_k[s][b]) for b in keys(busses)) <= α[s]
+        α[s] >= objectives[s] + sum(μs[s][b] * (dm.variables[vkey][s][:z][b] - z_k[s][b]) for b in keys(busses)),
+        base_name = Symbol(:benders_cut, i)
     )
 end
 
@@ -614,14 +655,21 @@ function solve_problem!(m)
     JuMP.optimize!(m)
 
     if JuMP.termination_status(m) != MOI.OPTIMAL
-        error("Optimization failed with status $(JuMP.termination_status(m))")
+        if JuMp.termination_status(m) == MOI.TIME_LIMIT && JuMP.has_values(m)
+            @warn("Optimization stopped with suboptimal solution")
+        else
+            @error("Optimization failed with status $(JuMP.termination_status(m))")
+        end
     end
 end
 
-function get_values_of_cv(dm::DispatchModel)::Dict{Symbol,Int}
-    R = Dict{Symbol,Int}()
-    for b in keys(dm.data.network.busses)
-        R[b] = round(JuMP.value(dm.variables[:mp][:r][b]))
+function get_values_of_cv(dm::DispatchModel)::Dict{Symbol,Dict{Symbol,Int}}
+    z = Dict{Symbol,Dict{Symbol,Int}}()
+    for s in keys(dm.data.scenarios)
+        z[s] = Dict{Symbol,Int}()
+        for b in keys(dm.data.network.busses)
+            z[s][b] = round(JuMP.value(dm.variables[:mp][s][:z][b]))
+        end
     end
-    return R
+    return z
 end

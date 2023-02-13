@@ -43,24 +43,15 @@ function get_weighted_busses(
     return weighted_busses
 end
 
-# old: returns sum of the line capacities connected to the bus
-# new: returns sum of capacity of generators connected to the bus
 function determine_weight(bus::Bus, network::Network)::Float64
-    # lines = network.lines
-    # lines = filter(
-    #     x -> x[2].from == bus.id || x[2].to == bus.id,
-    #     lines,
-    # )
-
-    # weight = sum(map(x -> x.capacity, values(lines)))
-    # return weight
-
-    generator_ids = bus.generators
-    generators = filter(
-        x -> x.id in generator_ids,
-        collect(values(network.generators)),
+    lines = network.lines
+    lines = filter(
+        x -> x[2].from == bus.id || x[2].to == bus.id,
+        lines,
     )
-    return sum(map(x -> x.max_capacity, generators))
+
+    weight = sum(map(x -> x.capacity, values(lines)))
+    return weight
 end
 
 function create_bus_dataframe(bus_ids::Vector{Symbol})::DataFrame
