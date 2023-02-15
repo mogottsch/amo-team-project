@@ -1,0 +1,5 @@
+source_path,objective_value_sum,solve_time_sum,mean_load_mean
+/home/moritz/dev/uni/amo-team-project/data/Scenario_2023B.xlsx,21944.176076035434,537.054235458374,18590.428926721423
+/home/moritz/dev/uni/amo-team-project/data/Scenario_2023C.xlsx,22811.597245479046,550.7860646247864,18590.428926721423
+/home/moritz/dev/uni/amo-team-project/data/Scenario_2023A.xlsx,24414.58096123512,569.347473859787,18590.428926721423
+/home/moritz/dev/uni/amo-team-project/data/Scenario_2013.xlsx,36230.603391274526,737.64697432518,18590.428926721423

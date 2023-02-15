@@ -29,21 +29,41 @@ function translate_weather_to_capacity(
     generators::Dict{Symbol,Generator},
 )::DataFrame
     new_scenarios = copy(scenarios)
-    solar_max = maximum(scenarios[!, :solar_weather])
-    wind_max = maximum(scenarios[!, :wind_weather])
+
     for (generator_id, generator) in generators
         column_name = string(generator_id, "_capacity")
         if generator.type == fossil
             continue
         end
         if generator.type == solar
-            new_scenarios[!, column_name] = new_scenarios[!, :solar_weather] .* generator.max_capacity ./ solar_max
+            # we approximate the capacities of PV generators by multiplying
+            # maximum capacity with the solar irradiation which is between 0 and 1
+            new_scenarios[!, column_name] = new_scenarios[!, :solar_weather] .* generator.max_capacity
         end
         if generator.type == wind
-            new_scenarios[!, column_name] = new_scenarios[!, :wind_weather] .* generator.max_capacity ./ wind_max
+            new_scenarios[!, column_name] = get_wind_power_generation.(new_scenarios[!, :wind_weather], generator.max_capacity)
         end
     end
     return new_scenarios
+end
+
+cut_in = 3.5 # m/s
+cut_out = 25.0 # m/s
+rated_wind_speed = 12.0 # m/s
+
+function get_wind_power_generation(
+    wind_speed::Float64,
+    maximum_power::Float64,
+)
+    if wind_speed < cut_in || wind_speed > cut_out
+        return 0.0
+    end
+
+    if wind_speed < rated_wind_speed
+        return maximum_power * (wind_speed - cut_in) / (rated_wind_speed - cut_in)
+    end
+
+    return maximum_power
 end
 
 function convert_df_to_scenarios(scenario_df::DataFrame)::Dict{Symbol,Scenario}

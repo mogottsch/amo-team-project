@@ -82,6 +82,7 @@ struct ResultsSummary
     objective_value::Float64
     solve_time::Float64
     mean_load::Float64
+    reinforced_busses::Vector{String}
 end
 
 function get_results_summary(dm::DispatchModel)::ResultsSummary
@@ -91,12 +92,18 @@ function get_results_summary(dm::DispatchModel)::ResultsSummary
         sum((collect(values(scenario_dict[scenario_key].loads))))
         for scenario_key in keys(scenario_dict)
     ])
+    reinforced_busses = [
+        string(b)
+        for b in keys(dm.data.network.busses)
+        if round(JuMP.value(dm.variables[Symbol()][:r][b])) == 1
+    ]
 
     return ResultsSummary(
         JuMP.termination_status(dm.m),
         JuMP.objective_value(dm.m),
         JuMP.solve_time(dm.m),
-        mean_load
+        mean_load,
+        reinforced_busses
     )
 end
 

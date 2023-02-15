@@ -58,7 +58,6 @@ function create_bus_dataframe(bus_ids::Vector{Symbol})::DataFrame
     # dummy column to create DataFrame with correct datatypes & column names
     columns = map(x -> Pair(x, true), bus_ids)
     df = DataFrame(columns)
-    # remove dummy column
     df = df[2:end, :]
 end
 

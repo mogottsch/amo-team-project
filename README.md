@@ -24,17 +24,35 @@ folder.
 The `results` folder is intended to contain the results of the model/simulation,
 which will stored as `.csv` files.
 
-| file           | description                                                                                          |
-| -------------- | ---------------------------------------------------------------------------------------------------- |
-| rwth_parser.jl | loads the data from the RWTH Aachen University dataset                                               |
-| scenarios/     | contains mulitple files intended for scenario generation and reduction                               |
-| types.jl       | contains the data types used in the model                                                            |
-| process.jl     | contains the model and the simulation (4 different electricity architectures in 12 different months) |
-| main.jl        | cli wrapper for the model and the simulation                                                         |
-| notebooks/     | contains jupyter notebooks mainly for testing purposes                                               |
+| file                                         | description                                                                                          |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| rwth_parser.jl                               | loads the data from the RWTH Aachen University dataset                                               |
+| scenarios/                                   | contains mulitple files intended for scenario generation and reduction                               |
+| types.jl                                     | contains the data types used in the model                                                            |
+| process.jl                                   | contains the model and the simulation (4 different electricity architectures in 12 different months) |
+| main.jl                                      | cli wrapper for the model and the simulation                                                         |
+| notebooks/                                   | contains jupyter notebooks                                                                           |
+| notebooks/01_single_model.ipynb              | explains how to build and solve a single model                                                       |
+| notebooks/01a_approximation_renewables.ipynb | explains conversion between wind speed/solar irradiance and maximum power generation                 |
+| notebooks/02_simulation.ipynb                | explains how to run a simulation consisting of multiple models                                       |
+| notebooks/02a_architectures.ipynb            | explains the data used                                                                               |
+| notebooks/03_results.ipynb                   | visualizes results                                                                                   |
 
 ## How to run
 
-1. Place the [data](https://www.iaew.rwth-aachen.de/go/id/ivfsh/?lidx=1) in the `data` folder.
-2. Install [Gurobi](https://www.gurobi.com/academia/academic-program-and-licenses/) or change the solver in `src/model.jl`.
-3. Run `julia ./src/main.jl ./results/sample/config.json` to run a simulation. Look into the `config.json` file to see how to configure the simulation.
+1. Place the [data](https://www.iaew.rwth-aachen.de/go/id/ivfsh/?lidx=1) in the
+   `data` folder. (folder should contain `Scenario_XXX.xlsx`)
+2. Install
+   [Gurobi](https://www.gurobi.com/academia/academic-program-and-licenses/) or
+   change the solver in `src/model.jl`.
+3. Run `julia ./src/main.jl ./results/sample/config.json` to run a simulation.
+   Look into the `config.json` file to see how to configure the simulation. For
+   a description of the variables read `./notebooks/03_simulation.ipynb`.
+
+### Run results.ipynb
+
+The visualization of results is done with Python and requires additional setup:
+
+1. Install [conda](https://docs.conda.io/en/latest/)
+2. Run `conda env create -f environment.yml`
+3. Run `conda activate AMO`

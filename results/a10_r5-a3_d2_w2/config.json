@@ -9,7 +9,7 @@
   "n_intermediate_attack_scenarios": 10000,
   "n_intermediate_weather_scenarios": 10000,
   "n_reduced_attack_scenarios": 4,
-  "n_reduced_weather_scenarios": 4,
-  "n_reduced_load_scenarios": 4,
+  "n_reduced_weather_scenarios": 2,
+  "n_reduced_load_scenarios": 2,
   "reinforcment_budget": 5.0
 }

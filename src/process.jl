@@ -48,9 +48,13 @@ GRB_ENV = Gurobi.Env()
 function run_simulation(c::Config)
     println("Initializing environment")
     results_df = create_results_df()
+
+    # the loads are the same for all files,
+    # therefore we use those of the first one
     global_loads = read_loads(c.data_source_paths[1])
 
 
+    # we don't implement different weather scenarios for each month
     weather_scenarios = generate_weather_scenarios(
         c.n_intermediate_weather_scenarios
     )
@@ -59,6 +63,7 @@ function run_simulation(c::Config)
         c.n_reduced_weather_scenarios
     )
 
+    # different load scenarios for each month
     loads_dict = Dict{Int,DataFrame}()
     for month in 1:MONTHS_PER_YEAR
         local_loads = remove_non_data_rows(filter_month(global_loads, month))
@@ -74,8 +79,11 @@ function run_simulation(c::Config)
         network = read_network(source_path)
 
         @showprogress source_path for month in 1:MONTHS_PER_YEAR
+            # use load scenario of current month (same for all architectures)
             reduced_load_scenarios = loads_dict[month]
 
+
+            # generate new attack scenario (different for each architecture & month)
             attack_scenarios = generate_attack_scenarios(
                 network,
                 c.n_attacks,
@@ -93,7 +101,7 @@ function run_simulation(c::Config)
             )
             scenarios = translate_weather_to_capacity(scenarios, network.generators)
             scenario_dict = convert_df_to_scenarios(scenarios)
-            dispatch_model = DispatchModel(network, scenario_dict, 5.0)
+            dispatch_model = DispatchModel(network, scenario_dict, c.reinforcment_budget)
             init_model!(dispatch_model)
 
             optimize!(dispatch_model.m)
@@ -123,10 +131,12 @@ function create_results_df()
         objective_value=Float64[],
         solve_time=Float64[],
         mean_load=Float64[],
+        reinforced_busses=String[]
     )
 end
 
 function push_results!(df::DataFrame, results::ResultsSummary, source_path::String, month::Int)
+    joined_reinforced_busses = join(results.reinforced_busses, ",")
     push!(df, [
         source_path,
         month,
@@ -134,5 +144,6 @@ function push_results!(df::DataFrame, results::ResultsSummary, source_path::Stri
         results.objective_value,
         results.solve_time,
         results.mean_load,
+        joined_reinforced_busses
     ])
 end

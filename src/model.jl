@@ -327,8 +327,7 @@ function append_second_stage_constraints_for_scenario!(
     dm.constraints[vkey][s][:fossil_generator_under_outage_lower] = @constraint(m,
         [g in keys(fossil_generators)],
         #
-        # fossil_generators[g].min_capacity * z[fossil_generators[g].bus] <= P_f[g]
-        0 <= P_f[g]
+        fossil_generators[g].min_capacity * z[fossil_generators[g].bus] <= P_f[g]
     )
 
     ### fossil generator under outage upper

@@ -1,0 +1,15 @@
+{
+  "data_source_paths": [
+    "../../data/Scenario_2013.xlsx",
+    "../../data/Scenario_2023A.xlsx",
+    "../../data/Scenario_2023B.xlsx",
+    "../../data/Scenario_2023C.xlsx"
+  ],
+  "n_attacks": 10,
+  "n_intermediate_attack_scenarios": 10000,
+  "n_intermediate_weather_scenarios": 10000,
+  "n_reduced_attack_scenarios": 2,
+  "n_reduced_weather_scenarios": 2,
+  "n_reduced_load_scenarios": 2,
+  "reinforcment_budget": 5.0
+}
